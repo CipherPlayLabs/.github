@@ -24,6 +24,7 @@ TYPE=static                # required. static | docker
 | `SLUG` | static | Webroot name under `/var/www/`. Defaults to the lowercased repo name. |
 | `PORT` | docker | Loopback port nginx proxies to. **Required** for `docker`. |
 | `COMPOSE_FILE` | docker | Default `docker-compose.yml`. |
+| `COMPOSE_PROJECT` | docker | Compose project name. **Pin this.** See the warning below. |
 
 Only `PUBLISH_DIR` is exposed to the web. Everything else in the repo — `docs/`,
 `brand/`, `.env` — stays off the public internet.
@@ -44,6 +45,20 @@ jobs:
 
 That's it. `secrets: inherit` picks up the org-level `DEPLOY_SSH_HOST` and
 `DEPLOY_SSH_KEY`; you never paste a key into a repo.
+
+### `COMPOSE_PROJECT`: pin it, or risk orphaning your database
+
+Compose derives its project name from the **directory basename**, and the project
+name **namespaces the volumes**. AutoGrow's compose file lives in `server/`, so
+its project is `server` and its data volume is `server_appdata`.
+
+If the project name silently changed to `autogrow`, Compose would not error — it
+would cheerfully create a brand-new, **empty** `autogrow_appdata` and leave the
+live database orphaned. The deployer runs compose from the compose file's own
+directory to preserve this, and `COMPOSE_PROJECT` pins it explicitly on top.
+
+Set it to whatever `docker inspect <container> --format '{{index .Config.Labels
+"com.docker.compose.project"}}'` reports today.
 
 ## Certificates
 
