@@ -35,6 +35,16 @@ on:
         type: string
         required: false
         default: ''
+      env:
+        description: >-
+          Which environment to deploy. Empty means the default, prod, and reads
+          .cipherplay/deploy.env exactly as before. A name reads
+          .cipherplay/deploy.<name>.env instead, which is how one repository
+          ships more than one site - a landing beside its app, or a game beside
+          a venue - each with its own DOMAIN and so its own nginx vhost.
+        type: string
+        required: false
+        default: ''
     secrets:
       DEPLOY_SSH_HOST:
         required: true
@@ -52,7 +62,9 @@ jobs:
     # One deploy per repo at a time. A second push queues rather than racing two
     # builds into the same webroot.
     concurrency:
-      group: cpdeploy-${{ inputs.repo || github.event.repository.name }}
+      # Per environment, not per repository: a repo shipping two sites can
+      # deploy both at once, while two deploys of the SAME site still queue.
+      group: cpdeploy-${{ inputs.repo || github.event.repository.name }}-${{ inputs.env || 'prod' }}
       cancel-in-progress: false
 
     steps:
@@ -76,14 +88,24 @@ jobs:
           HOST: ${{ secrets.DEPLOY_SSH_HOST }}
           REPO: ${{ inputs.repo || github.event.repository.name }}
           REF: ${{ inputs.ref || github.ref_name }}
+          ENV_NAME: ${{ inputs.env }}
           TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          echo "Deploying $REPO@$REF via $HOST"
+          # Built here so the flag is simply ABSENT when no environment was
+          # asked for: an existing caller runs the byte-for-byte command it
+          # always ran, and cannot change behaviour because this input exists.
+          if [ -n "$ENV_NAME" ]; then
+            REMOTE="cpdeploy $REPO $REF --env $ENV_NAME"
+            echo "Deploying $REPO@$REF [$ENV_NAME] via $HOST"
+          else
+            REMOTE="cpdeploy $REPO $REF"
+            echo "Deploying $REPO@$REF via $HOST"
+          fi
           # Token goes over stdin, never argv — argv is world-readable in /proc.
           printf '%s\n' "$TOKEN" \
             | ssh -i ~/.ssh/cpdeploy -o BatchMode=yes -o ConnectTimeout=20 \
-                  "$HOST" "cpdeploy $REPO $REF" \
+                  "$HOST" "$REMOTE" \
             | tee deploy.log
 
       - name: Summary
